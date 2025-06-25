@@ -1,0 +1,16 @@
+# command.txt
+# 使用 configs/default.yaml 进行训练的命令
+
+# 单 GPU 训练
+python train.py --config configs/default.yaml
+
+# 多 GPU 训练（例如使用 GPU 0 和 1）
+CUDA_VISIBLE_DEVICES=0,1 python train.py --config configs/default.yaml
+
+# 开启 WandB 可视化
+# 确保你已登录 wandb： wandb login
+python train.py --config configs/default.yaml
+
+# 如需修改 batch size 或输出目录，可编辑 default.yaml：
+# batch_size: 4
+# out_dir: ./results/exp1

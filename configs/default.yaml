@@ -1,0 +1,58 @@
+# configs/default.yaml
+# DDPM 分割训练默认配置（可配合 train.py 使用 --config configs/default.yaml 加载）
+
+# 数据设置
+data_name: "ISIC"         # BRATS / ISIC / custom
+data_dir: "/data/yinwu/VOCdevkit_All/ISIC_All/Train"  # 注意：已适配 ISIC 官方数据结构
+val_data_dir: "/data/yinwu/VOCdevkit_All/ISIC_All/Val"
+image_size: 256
+in_ch: 4
+
+# 模型设置
+model_channels: 64
+num_res_blocks: 2
+channel_mult: "1,2,4,4"
+attention_resolutions: "16,8"
+num_heads: 1
+out_channels: 2
+version: "new"
+dropout: 0.0
+
+# diffusion 设置
+diffusion_steps: 1000
+noise_schedule: "linear"
+schedule_sampler: "uniform"
+predict_xstart: False
+
+# 训练设置
+train_steps: 200000
+use_scheduler: true             # 是否使用调度器
+scheduler_type: "cosine"       # 类型可选 "cosine"、"none"
+lr_scheduler_tmax: 200000        # CosineAnnealing 的 T_max
+
+lr: 0.0001
+batch_size: 24
+microbatch: -1
+weight_decay: 0.0
+lr_anneal_steps: 0
+ema_rate: "0.9999"
+use_fp16: False
+fp16_scale_growth: 1e-3
+
+# 设备设置
+multi_gpu: "0,1"
+gpu_dev: "0"
+
+# 日志设置
+log_interval: 100
+save_interval: 2000
+val_interval: 2000
+resume_checkpoint: null
+out_dir: "./results"
+use_wandb: true
+wandb_project: "ddpm_seg"
+
+
+# 可视化设置
+vis_interval: 500
+max_vis_samples: 4
