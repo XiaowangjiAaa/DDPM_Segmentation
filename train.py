@@ -3,6 +3,7 @@ import yaml
 import argparse
 import torch
 from torch.utils.data import DataLoader
+from accelerate import Accelerator
 from torchvision import transforms
 
 from models.unet_model import UNetModel_newpreview
@@ -26,6 +27,7 @@ def main():
         use_wandb=args.use_wandb,
         config=vars(args)
     )
+    accelerator = Accelerator()
     logger.log("Loading ISIC dataset...")
 
     transform = transforms.Compose([
@@ -55,13 +57,7 @@ def main():
         resblock_updown=False,
         use_scale_shift_norm=True,
         num_heads=args.num_heads,
-    ).cuda()
-
-    if args.multi_gpu:
-        device_ids = [int(i) for i in str(args.multi_gpu).split(',')]
-        model = torch.nn.DataParallel(model, device_ids=device_ids)
-
-    model = model.cuda()
+    ).to(accelerator.device)
 
     logger.log("Training...")
     TrainLoop(
@@ -82,6 +78,7 @@ def main():
         val_interval=args.val_interval,
         use_scheduler=args.use_scheduler,
         lr_scheduler_tmax=args.lr_scheduler_tmax,
+        accelerator=accelerator,
     ).run_loop()
 
 

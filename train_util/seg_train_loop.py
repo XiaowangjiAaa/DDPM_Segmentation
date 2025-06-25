@@ -8,6 +8,7 @@ from PIL import Image
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.distributed import is_initialized, get_rank
+from accelerate import Accelerator
 
 from utils.metrics import dice_loss, dice_score, iou_score, f1_score
 from utils import logger
@@ -39,6 +40,7 @@ class TrainLoop:
         use_scheduler=True,
         lr_scheduler_tmax=200000,
         train_steps=200000,
+        accelerator: Accelerator = None,
     ):
         self.model = model
         self.diffusion = diffusion
@@ -57,15 +59,25 @@ class TrainLoop:
         self.logger = logger
         self.out_dir = out_dir
         self.train_steps = train_steps
+        self.accelerator = accelerator
 
         self.step = 0
         self.best_dice = 0.0
         self.opt = AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-
         if use_scheduler:
             self.scheduler = CosineAnnealingLR(self.opt, T_max=lr_scheduler_tmax, eta_min=1e-6)
         else:
             self.scheduler = None
+
+        if self.accelerator is not None:
+            if self.val_loader is not None:
+                self.model, self.opt, self.dataloader, self.val_loader = self.accelerator.prepare(
+                    self.model, self.opt, self.dataloader, self.val_loader
+                )
+            else:
+                self.model, self.opt, self.dataloader = self.accelerator.prepare(
+                    self.model, self.opt, self.dataloader
+                )
 
     def run_loop(self):
         self.model.train()
@@ -74,12 +86,16 @@ class TrainLoop:
                 loss = self.run_step(batch)
                 self.step += 1
 
-                if self.step % self.log_interval == 0 and is_main_process():
+                if self.step % self.log_interval == 0 and (
+                    self.accelerator.is_main_process if self.accelerator else is_main_process()
+                ):
                     print(f"[Step {self.step}] step logged.")
                     if self.logger:
                         self.logger.log_metrics({"step": self.step}, step=self.step)
 
-                if self.step % self.save_interval == 0 and is_main_process():
+                if self.step % self.save_interval == 0 and (
+                    self.accelerator.is_main_process if self.accelerator else is_main_process()
+                ):
                     self.save_model(self.step, loss)
 
                 if self.val_loader and self.step % self.val_interval == 0:
@@ -91,21 +107,27 @@ class TrainLoop:
     def run_step(self, batch):
         self.opt.zero_grad()
 
-        x = batch["image"].cuda()
-        y = batch["mask"].long().squeeze(1).cuda()
-        t = th.randint(0, self.diffusion.num_timesteps, (x.size(0),), device=x.device)
+        device = self.accelerator.device if self.accelerator else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        x = batch["image"].to(device)
+        y = batch["mask"].long().squeeze(1).to(device)
+        t = th.randint(0, self.diffusion.num_timesteps, (x.size(0),), device=device)
 
         out, _ = self.model(x, t)
         ce = F.cross_entropy(out, y)
         dice = dice_loss(out, y)
         loss = ce + 0.5 * dice
 
-        loss.backward()
+        if self.accelerator:
+            self.accelerator.backward(loss)
+        else:
+            loss.backward()
         self.opt.step()
         if self.scheduler:
             self.scheduler.step()
 
-        if self.step % 10 == 0 and is_main_process():
+        if self.step % 10 == 0 and (
+            self.accelerator.is_main_process if self.accelerator else is_main_process()
+        ):
             print(f"[step {self.step}] seg_loss: {loss.item():.4f}")
             print(f"[{self.step}] CE: {ce.item():.4f}, Dice: {dice.item():.4f}")
             if self.logger:
@@ -120,14 +142,19 @@ class TrainLoop:
 
     def run_validation(self, val_loader):
         self.model.eval()
-        model = self.model.module if hasattr(self.model, "module") else self.model
+        model = (
+            self.accelerator.unwrap_model(self.model)
+            if self.accelerator
+            else (self.model.module if hasattr(self.model, "module") else self.model)
+        )
         dices, ious, f1s = [], [], []
 
         with torch.no_grad():
             for batch in val_loader:
-                x = batch["image"].cuda()
-                y = batch["mask"].long().squeeze(1).cuda()
-                t = th.zeros(x.size(0), dtype=torch.long).cuda()
+                device = self.accelerator.device if self.accelerator else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                x = batch["image"].to(device)
+                y = batch["mask"].long().squeeze(1).to(device)
+                t = th.zeros(x.size(0), dtype=torch.long, device=device)
 
                 out, _ = model(x, t)
                 pred_class = out.argmax(dim=1)
@@ -139,7 +166,9 @@ class TrainLoop:
                 ious.append(iou_score(pred_onehot, target_onehot).item())
                 f1s.append(f1_score(pred_onehot, target_onehot).item())
 
-                if self.logger and is_main_process() and len(dices) <= 4:
+                if self.logger and (
+                    self.accelerator.is_main_process if self.accelerator else is_main_process()
+                ) and len(dices) <= 4:
                     for i in range(x.shape[0]):
                         rgb = (x[i, :3].detach().cpu().numpy() * 255).astype(np.uint8)
                         rgb = np.transpose(rgb, (1, 2, 0))
@@ -154,7 +183,7 @@ class TrainLoop:
         avg_iou = sum(ious) / len(ious)
         avg_f1 = sum(f1s) / len(f1s)
 
-        if is_main_process():
+        if self.accelerator.is_main_process if self.accelerator else is_main_process():
             print(f"[Validation] Dice: {avg_dice:.4f} | IoU: {avg_iou:.4f} | F1: {avg_f1:.4f}")
             if self.logger:
                 self.logger.log_metrics({
@@ -166,7 +195,10 @@ class TrainLoop:
             if avg_dice > self.best_dice:
                 self.best_dice = avg_dice
                 best_path = os.path.join(self.out_dir, "best.pt")
-                th.save(self.model.state_dict(), best_path)
+                to_save = self.accelerator.unwrap_model(self.model) if self.accelerator else self.model
+                if self.accelerator:
+                    self.accelerator.wait_for_everyone()
+                th.save(to_save.state_dict(), best_path)
                 print(f"[Best Model] Dice improved to {avg_dice:.4f}, saved to {best_path}")
 
         self.model.train()
@@ -175,5 +207,8 @@ class TrainLoop:
         os.makedirs(self.out_dir, exist_ok=True)
         loss_str = f"{loss_value:.4f}"
         path = os.path.join(self.out_dir, f"model_step{step}_loss{loss_str}.pt")
-        th.save(self.model.state_dict(), path)
+        to_save = self.accelerator.unwrap_model(self.model) if self.accelerator else self.model
+        if self.accelerator:
+            self.accelerator.wait_for_everyone()
+        th.save(to_save.state_dict(), path)
         print(f"[Checkpoint] Saved model to {path}")
