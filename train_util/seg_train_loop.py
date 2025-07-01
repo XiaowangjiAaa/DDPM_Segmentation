@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.distributed import is_initialized, get_rank
 from accelerate import Accelerator
 
-from utils.metrics import dice_loss, dice_score, iou_score, f1_score
+from utils.metrics import dice_score, iou_score, f1_score
 from utils import logger
 
 
@@ -109,13 +109,10 @@ class TrainLoop:
 
         device = self.accelerator.device if self.accelerator else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         x = batch["image"].to(device)
-        y = batch["mask"].long().squeeze(1).to(device)
+        y = batch["mask"].float().to(device)
         t = th.randint(0, self.diffusion.num_timesteps, (x.size(0),), device=device)
 
-        out, _ = self.model(x, t)
-        ce = F.cross_entropy(out, y)
-        dice = dice_loss(out, y)
-        loss = ce + 0.5 * dice
+        loss = self.diffusion.p_losses(self.model, y, t, cond=x)
 
         if self.accelerator:
             self.accelerator.backward(loss)
@@ -128,13 +125,10 @@ class TrainLoop:
         if self.step % 10 == 0 and (
             self.accelerator.is_main_process if self.accelerator else is_main_process()
         ):
-            print(f"[step {self.step}] seg_loss: {loss.item():.4f}")
-            print(f"[{self.step}] CE: {ce.item():.4f}, Dice: {dice.item():.4f}")
+            print(f"[step {self.step}] loss: {loss.item():.4f}")
             if self.logger:
                 self.logger.log_metrics({
                     "train/loss": loss.item(),
-                    "train/ce": ce.item(),
-                    "train/dice": dice.item(),
                     "lr": self.scheduler.get_last_lr()[0] if self.scheduler else self.lr
                 }, step=self.step)
 
@@ -153,14 +147,13 @@ class TrainLoop:
             for batch in val_loader:
                 device = self.accelerator.device if self.accelerator else torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 x = batch["image"].to(device)
-                y = batch["mask"].long().squeeze(1).to(device)
-                t = th.zeros(x.size(0), dtype=torch.long, device=device)
+                y = batch["mask"].float().to(device)
 
-                out, _ = model(x, t)
-                pred_class = out.argmax(dim=1)
+                pred = self.diffusion.p_sample_loop(model, y.shape, cond=x)
+                pred_class = (pred > 0.5).long().squeeze(1)
 
                 pred_onehot = F.one_hot(pred_class, num_classes=2).permute(0, 3, 1, 2).float()
-                target_onehot = F.one_hot(y, num_classes=2).permute(0, 3, 1, 2).float()
+                target_onehot = F.one_hot(y.long().squeeze(1), num_classes=2).permute(0, 3, 1, 2).float()
 
                 dices.append(dice_score(pred_onehot, target_onehot).item())
                 ious.append(iou_score(pred_onehot, target_onehot).item())
@@ -173,7 +166,7 @@ class TrainLoop:
                         rgb = (x[i, :3].detach().cpu().numpy() * 255).astype(np.uint8)
                         rgb = np.transpose(rgb, (1, 2, 0))
                         pred_vis = (pred_class[i].detach().cpu().numpy() * 255).astype(np.uint8)
-                        gt_vis = (y[i].detach().cpu().numpy() * 255).astype(np.uint8)
+                        gt_vis = (y[i, 0].detach().cpu().numpy() * 255).astype(np.uint8)
 
                         images = [Image.fromarray(rgb), Image.fromarray(gt_vis), Image.fromarray(pred_vis)]
                         names = [f"{i}_input", f"{i}_gt", f"{i}_pred"]
