@@ -25,7 +25,7 @@ def main():
         image_size=image_size,
         in_channels=4,
         model_channels=64,
-        out_channels=2,
+        out_channels=1,
         num_res_blocks=2,
         attention_resolutions=[16, 8],
         dropout=0.0,
@@ -62,8 +62,8 @@ def main():
     all_dices = []
 
     for batch in dataloader:
-        x = batch["image"].cuda()                # [1, 4, H, W]
-        gt = batch["mask"].squeeze(0).numpy()   # [H, W] GT 为 0/1
+        img = batch["image"].cuda()                # [1, 3, H, W]
+        gt = batch["mask"].squeeze(0).numpy()      # [H, W] GT 为 0/1
         name = batch["name"][0].split('.')[0]
 
         # Resize GT 为固定大小（如果没在 Dataset 中 resize）
@@ -74,9 +74,8 @@ def main():
         sample_dices = []
 
         for i in range(num_samples):
-            t = torch.tensor([0], dtype=torch.long).cuda()
-            out, _ = model(x, t)
-            pred = torch.argmax(out, dim=1)[0].cpu().numpy()  # [H, W] 0/1 mask
+            pred = diffusion.p_sample_loop(model, (1, 1, image_size, image_size), cond=img)[0]
+            pred = (pred > 0.5).float()[0, 0].cpu().numpy()
 
             # 保存每次结果图（可选）
             out_path = os.path.join(out_dir, f"{name}_sample{i}.png")

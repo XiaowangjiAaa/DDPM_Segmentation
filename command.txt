@@ -4,8 +4,8 @@
 # 单 GPU 训练
 python train.py --config configs/default.yaml
 
-# 多 GPU 训练（例如使用 GPU 0 和 1）
-CUDA_VISIBLE_DEVICES=0,1 python train.py --config configs/default.yaml
+# 多 GPU 训练（使用 accelerate)
+accelerate launch train.py --config configs/default.yaml
 
 # 开启 WandB 可视化
 # 确保你已登录 wandb： wandb login

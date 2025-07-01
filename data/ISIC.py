@@ -41,13 +41,11 @@ class ISICDataset(Dataset):
         torch.set_rng_state(state)
         mask = self.transform(mask)
 
-        # 拼接为 4 通道输入（img + mask）
-        img_4ch = torch.cat([img, mask], dim=0)
         name = os.path.basename(img_path)
 
         return {
-            "image": img_4ch,                # [4, H, W]
-            "mask": mask.squeeze(0).long(), # [H, W]
-            "name": name
-            }
+            "image": img,         # [3, H, W]
+            "mask": mask.long(),  # [1, H, W]
+            "name": name,
+        }
     
